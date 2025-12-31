@@ -203,14 +203,37 @@ def get_available_indices(data_root, start_index=801):
     orig_folder = osp.join(data_root, 'Original')
     seg_folder = osp.join(data_root, 'Segmented')
     
+    print(f"Looking for images in:")
+    print(f"  Original folder: {osp.abspath(orig_folder)}")
+    print(f"  Segmented folder: {osp.abspath(seg_folder)}")
+    
     if not osp.exists(orig_folder):
+        print(f"\n❌ ERROR: Original folder not found!")
+        print(f"Expected location: {osp.abspath(orig_folder)}")
+        print(f"\nContents of {osp.abspath(data_root)}:")
+        if osp.exists(data_root):
+            for item in os.listdir(data_root):
+                item_path = osp.join(data_root, item)
+                if osp.isdir(item_path):
+                    print(f"  📁 {item}/")
+                else:
+                    print(f"  📄 {item}")
         raise ValueError(f"Original folder not found: {orig_folder}")
+    
+    if not osp.exists(seg_folder):
+        print(f"\n❌ ERROR: Segmented folder not found!")
+        print(f"Expected location: {osp.abspath(seg_folder)}")
+        raise ValueError(f"Segmented folder not found: {seg_folder}")
     
     indices = []
     extensions = ['.png', '.PNG', '.jpg', '.JPG', '.jpeg', '.JPEG', '.tif', '.TIF', '.tiff', '.TIFF']
     
     # Scan original folder
-    for filename in os.listdir(orig_folder):
+    print(f"\nScanning for images starting from index {start_index}...")
+    all_orig_files = os.listdir(orig_folder)
+    print(f"Found {len(all_orig_files)} files in Original folder")
+    
+    for filename in all_orig_files:
         name, ext = osp.splitext(filename)
         if ext in extensions:
             try:
@@ -223,6 +246,8 @@ def get_available_indices(data_root, start_index=801):
                     )
                     if seg_exists:
                         indices.append(idx)
+                    else:
+                        print(f"  ⚠️  Warning: No matching segment found for {filename}")
             except ValueError:
                 continue
     
