@@ -43,7 +43,7 @@ parser.add_argument('--cycle_lens', type=str, default='20/50', help='cycling con
 parser.add_argument('--grad_clip', type=float, default=1.0, help='gradient clipping value (0 to disable)')
 parser.add_argument('--metric', type=str, default='auc', help='metric for monitoring (auc/loss/dice)')
 parser.add_argument('--im_size', type=int, default=1024, help='image size')
-parser.add_argument('--in_c', type=int, default=3, help='channels in input images')
+parser.add_argument('--in_c', type=int, default=1, help='channels in input images (1=green channel only, 3=RGB)')
 parser.add_argument('--do_not_save', type=str2bool, nargs='?', const=True, default=False, help='avoid saving')
 parser.add_argument('--save_path', type=str, default='fives_experiment', help='path to save model')
 parser.add_argument('--num_workers', type=int, default=4, help='number of workers for parallel data loading (4-8 recommended)')
@@ -116,6 +116,8 @@ class FIVESDataset(Dataset):
         
         # Load images
         img = Image.open(orig_path).convert('RGB')
+        # Extract green channel only (channel 1) for better vessel contrast
+        img = img.split()[1]  # Get green channel
         target = Image.open(seg_path).convert('L')  # Convert to grayscale
         
         # Resize to target size
@@ -130,9 +132,9 @@ class FIVESDataset(Dataset):
         img = TF.to_tensor(img)
         target = TF.to_tensor(target)
         
-        # Normalize image to [0, 1] and then apply ImageNet normalization
-        # This prevents extreme values that can cause NaN
-        img = TF.normalize(img, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        # Normalize green channel (single channel)
+        # Using ImageNet green channel statistics
+        img = TF.normalize(img, mean=[0.456], std=[0.224])
         
         # Convert target to binary (0 or 1)
         target = (target > 0.5).float().squeeze(0)
