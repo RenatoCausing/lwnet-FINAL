@@ -74,7 +74,8 @@ class FIVESDataset(Dataset):
         self.data_root = data_root
         self.indices = indices
         self.im_size = im_size
-        self.is_train = is_train
+        # Disable on-the-fly augmentation since we're using pre-generated augmented images
+        self.is_train = False  # Changed from is_train to always False
         self.aug_prob = aug_prob
         
         self.orig_folder = osp.join(data_root, 'Original')
