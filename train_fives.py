@@ -38,7 +38,7 @@ parser.add_argument('--model_name', type=str, default='wnet', help='architecture
 parser.add_argument('--batch_size', type=int, default=8, help='batch size (8 for V100, increase to 16-32 if you have more VRAM)')
 parser.add_argument('--grad_acc_steps', type=int, default=0, help='gradient accumulation steps (0)')
 parser.add_argument('--min_lr', type=float, default=1e-8, help='minimum learning rate')
-parser.add_argument('--max_lr', type=float, default=0.001, help='maximum learning rate (lowered to prevent NaN)')
+parser.add_argument('--max_lr', type=float, default=0.01, help='maximum learning rate (lowered to prevent NaN)')
 parser.add_argument('--cycle_lens', type=str, default='20/50', help='cycling config (nr cycles/cycle len)')
 parser.add_argument('--grad_clip', type=float, default=1.0, help='gradient clipping value (0 to disable)')
 parser.add_argument('--metric', type=str, default='auc', help='metric for monitoring (auc/loss/dice)')
