@@ -34,23 +34,24 @@ from utils.reproducibility import set_seeds
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_root', type=str, default='D:/DRIVE/FIVES', 
                     help='Root folder containing Original and Segmented subfolders')
-parser.add_argument('--model_name', type=str, default='big_wnet', help='architecture')
-parser.add_argument('--batch_size', type=int, default=2, help='batch size')
+parser.add_argument('--model_name', type=str, default='wnet', help='architecture')
+parser.add_argument('--batch_size', type=int, default=8, help='batch size (8 for V100, increase to 16-32 if you have more VRAM)')
 parser.add_argument('--grad_acc_steps', type=int, default=0, help='gradient accumulation steps (0)')
 parser.add_argument('--min_lr', type=float, default=1e-8, help='minimum learning rate')
-parser.add_argument('--max_lr', type=float, default=0.01, help='maximum learning rate')
+parser.add_argument('--max_lr', type=float, default=0.001, help='maximum learning rate (lowered to prevent NaN)')
 parser.add_argument('--cycle_lens', type=str, default='20/50', help='cycling config (nr cycles/cycle len)')
+parser.add_argument('--grad_clip', type=float, default=1.0, help='gradient clipping value (0 to disable)')
 parser.add_argument('--metric', type=str, default='auc', help='metric for monitoring (auc/loss/dice)')
 parser.add_argument('--im_size', type=int, default=1024, help='image size')
 parser.add_argument('--in_c', type=int, default=3, help='channels in input images')
 parser.add_argument('--do_not_save', type=str2bool, nargs='?', const=True, default=False, help='avoid saving')
 parser.add_argument('--save_path', type=str, default='fives_experiment', help='path to save model')
-parser.add_argument('--num_workers', type=int, default=0, help='number of workers for data loading')
+parser.add_argument('--num_workers', type=int, default=4, help='number of workers for parallel data loading (4-8 recommended)')
 parser.add_argument('--device', type=str, default='cuda:0', help='device (cpu or cuda:0)')
 parser.add_argument('--seed', type=int, default=42, help='random seed')
 parser.add_argument('--start_index', type=int, default=801, help='starting image index (default: 801)')
 parser.add_argument('--end_index', type=int, default=None, help='ending image index (default: auto-detect)')
-parser.add_argument('--train_split', type=float, default=0.9, help='training split ratio (default: 0.9)')
+parser.add_argument('--train_split', type=float, default=0.95, help='training split ratio (default: 0.95)')
 parser.add_argument('--aug_prob', type=float, default=0.5, help='probability of applying each augmentation')
 
 
@@ -127,6 +128,10 @@ class FIVESDataset(Dataset):
         # Convert to tensor
         img = TF.to_tensor(img)
         target = TF.to_tensor(target)
+        
+        # Normalize image to [0, 1] and then apply ImageNet normalization
+        # This prevents extreme values that can cause NaN
+        img = TF.normalize(img, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         
         # Convert target to binary (0 or 1)
         target = (target > 0.5).float().squeeze(0)
@@ -254,6 +259,43 @@ def get_available_indices(data_root, start_index=801):
     return sorted(indices)
 
 
+def validate_data_sample(data_root, indices, im_size=1024, num_samples=5):
+    """Validate a few data samples to check for issues"""
+    print(f"\n🔍 Validating {num_samples} random data samples...")
+    
+    dataset = FIVESDataset(data_root, indices[:num_samples], im_size, is_train=False)
+    
+    for i in range(min(num_samples, len(dataset))):
+        try:
+            img, target = dataset[i]
+            
+            # Check for NaN or Inf
+            if torch.isnan(img).any() or torch.isinf(img).any():
+                print(f"  ❌ Sample {i}: Image contains NaN/Inf!")
+                return False
+            if torch.isnan(target).any() or torch.isinf(target).any():
+                print(f"  ❌ Sample {i}: Target contains NaN/Inf!")
+                return False
+            
+            # Check value ranges
+            img_min, img_max = img.min().item(), img.max().item()
+            target_min, target_max = target.min().item(), target.max().item()
+            
+            print(f"  ✓ Sample {i}: Image range [{img_min:.3f}, {img_max:.3f}], Target range [{target_min:.3f}, {target_max:.3f}]")
+            
+            # Check target is binary
+            unique_vals = torch.unique(target)
+            if len(unique_vals) > 2:
+                print(f"    ⚠️  Warning: Target has {len(unique_vals)} unique values (expected 2)")
+        
+        except Exception as e:
+            print(f"  ❌ Sample {i}: Error loading - {e}")
+            return False
+    
+    print("  ✓ Data validation passed!")
+    return True
+
+
 def create_data_loaders(data_root, start_index, end_index, train_split, 
                         im_size, batch_size, num_workers, aug_prob, seed):
     """
@@ -281,6 +323,10 @@ def create_data_loaders(data_root, start_index, end_index, train_split,
     print(f"Training set: {len(train_indices)} images")
     print(f"Test set: {len(test_indices)} images")
     
+    # Validate data samples
+    if not validate_data_sample(data_root, all_indices, im_size):
+        raise ValueError("Data validation failed! Please check your data.")
+    
     # Create datasets
     train_dataset = FIVESDataset(
         data_root=data_root,
@@ -304,7 +350,9 @@ def create_data_loaders(data_root, start_index, end_index, train_split,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None
     )
     
     test_loader = DataLoader(
@@ -312,7 +360,9 @@ def create_data_loaders(data_root, start_index, end_index, train_split,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None
     )
     
     return train_loader, test_loader, train_indices, test_indices
@@ -336,7 +386,7 @@ def get_lr(optimizer):
 
 
 def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
-                  grad_acc_steps=0, assess=False):
+                  grad_acc_steps=0, assess=False, grad_clip=1.0):
     """Run one epoch of training or evaluation"""
     device = 'cuda' if next(model.parameters()).is_cuda else 'cpu'
     train = optimizer is not None
@@ -372,7 +422,20 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                 loss = criterion(logits, labels)
         
         if train:
+            # Check for NaN in loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"\n⚠️  WARNING: NaN/Inf loss detected at batch {i_batch}!")
+                print(f"   Loss value: {loss.item()}")
+                print(f"   Input stats: min={inputs.min().item():.4f}, max={inputs.max().item():.4f}, mean={inputs.mean().item():.4f}")
+                print(f"   Label stats: min={labels.min().item():.4f}, max={labels.max().item():.4f}")
+                raise ValueError("NaN/Inf loss encountered. Training stopped.")
+            
             (loss / (grad_acc_steps + 1)).backward()
+            
+            # Gradient clipping to prevent explosion
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            
             tr_lr = get_lr(optimizer)
             if i_batch % (grad_acc_steps + 1) == 0:
                 optimizer.step()
@@ -395,7 +458,7 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
 
 
 def train_one_cycle(train_loader, model, criterion, optimizer, scheduler, 
-                    grad_acc_steps=0, cycle=0):
+                    grad_acc_steps=0, cycle=0, grad_clip=1.0):
     """Train for one cycle"""
     model.train()
     optimizer.zero_grad()
@@ -407,7 +470,7 @@ def train_one_cycle(train_loader, model, criterion, optimizer, scheduler,
             tr_logits, tr_labels, tr_loss, tr_lr = run_one_epoch(
                 train_loader, model, criterion,
                 optimizer=optimizer, scheduler=scheduler,
-                grad_acc_steps=grad_acc_steps, assess=assess
+                grad_acc_steps=grad_acc_steps, assess=assess, grad_clip=grad_clip
             )
             t.set_postfix(tr_loss=f"{tr_loss:.4f}", lr=f"{tr_lr:.6f}")
     
@@ -415,7 +478,7 @@ def train_one_cycle(train_loader, model, criterion, optimizer, scheduler,
 
 
 def train_model(model, optimizer, criterion, train_loader, val_loader, 
-                scheduler, grad_acc_steps, metric, exp_path):
+                scheduler, grad_acc_steps, metric, exp_path, grad_clip=1.0):
     """Train the model"""
     n_cycles = len(scheduler.cycle_lens)
     best_auc, best_dice, best_cycle = 0, 0, 0
@@ -427,37 +490,38 @@ def train_model(model, optimizer, criterion, train_loader, val_loader,
         
         # Train one cycle
         tr_logits, tr_labels, tr_loss = train_one_cycle(
-            train_loader, model, criterion, optimizer, scheduler, grad_acc_steps, cycle
+            train_loader, model, criterion, optimizer, scheduler, grad_acc_steps, cycle, grad_clip
         )
         
         # Evaluate at end of cycle
         print('\nEvaluating...')
-        tr_auc, tr_dice = evaluate(tr_logits, tr_labels, model.n_classes)
+        from utils.evaluation import compute_metrics
+        tr_metrics = compute_metrics(tr_logits, tr_labels, model.n_classes)
         del tr_logits, tr_labels
         
         with torch.no_grad():
             vl_logits, vl_labels, vl_loss, _ = run_one_epoch(
                 val_loader, model, criterion, assess=True
             )
-            vl_auc, vl_dice = evaluate(vl_logits, vl_labels, model.n_classes)
+            vl_metrics = compute_metrics(vl_logits, vl_labels, model.n_classes)
             del vl_logits, vl_labels
         
         print(f'Train Loss: {tr_loss:.4f} | Val Loss: {vl_loss:.4f}')
-        print(f'Train AUC: {tr_auc:.4f} | Val AUC: {vl_auc:.4f}')
-        print(f'Train DICE: {tr_dice:.4f} | Val DICE: {vl_dice:.4f}')
+        print(f'Train - AUC: {tr_metrics["auc"]:.4f}, ACC: {tr_metrics["acc"]:.4f}, F1: {tr_metrics["f1"]:.4f}, Prec: {tr_metrics["prec"]:.4f}, Rec: {tr_metrics["rec"]:.4f}')
+        print(f'Val   - AUC: {vl_metrics["auc"]:.4f}, ACC: {vl_metrics["acc"]:.4f}, F1: {vl_metrics["f1"]:.4f}, Prec: {vl_metrics["prec"]:.4f}, Rec: {vl_metrics["rec"]:.4f}')
         print(f'Learning Rate: {get_lr(optimizer):.6f}')
         
         # Check if best
         if metric == 'auc':
-            monitoring_metric = vl_auc
+            monitoring_metric = vl_metrics['auc']
         elif metric == 'loss':
             monitoring_metric = vl_loss
         elif metric == 'dice':
-            monitoring_metric = vl_dice
+            monitoring_metric = vl_metrics['f1']  # F1 is similar to Dice
         
         if is_better(monitoring_metric, best_monitoring_metric):
             print(f'\n*** Best {metric} improved: {100*best_monitoring_metric:.2f}% -> {100*monitoring_metric:.2f}% ***')
-            best_auc, best_dice, best_cycle = vl_auc, vl_dice, cycle + 1
+            best_auc, best_dice, best_cycle = vl_metrics['auc'], vl_metrics['f1'], cycle + 1
             best_monitoring_metric = monitoring_metric
             if exp_path is not None:
                 print('Saving checkpoint...')
@@ -480,13 +544,17 @@ def test_model(model, test_loader, criterion):
         test_logits, test_labels, test_loss, _ = run_one_epoch(
             test_loader, model, criterion, assess=True
         )
-        test_auc, test_dice = evaluate(test_logits, test_labels, model.n_classes)
+        from utils.evaluation import compute_metrics
+        test_metrics = compute_metrics(test_logits, test_labels, model.n_classes)
     
     print(f'Test Loss: {test_loss:.4f}')
-    print(f'Test AUC: {test_auc:.4f} ({100*test_auc:.2f}%)')
-    print(f'Test DICE: {test_dice:.4f} ({100*test_dice:.2f}%)')
+    print(f'Test AUC:       {test_metrics["auc"]:.4f} ({100*test_metrics["auc"]:.2f}%)')
+    print(f'Test Accuracy:  {test_metrics["acc"]:.4f} ({100*test_metrics["acc"]:.2f}%)')
+    print(f'Test F1:        {test_metrics["f1"]:.4f} ({100*test_metrics["f1"]:.2f}%)')
+    print(f'Test Precision: {test_metrics["prec"]:.4f} ({100*test_metrics["prec"]:.2f}%)')
+    print(f'Test Recall:    {test_metrics["rec"]:.4f} ({100*test_metrics["rec"]:.2f}%)')
     
-    return test_auc, test_dice, test_loss
+    return test_metrics, test_loss
 
 
 def main():
@@ -498,6 +566,8 @@ def main():
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available!")
         print(f'* Using device: {args.device}')
+        print(f'* GPU Name: {torch.cuda.get_device_name(0)}')
+        print(f'* GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB')
         device = torch.device("cuda")
     else:
         device = torch.device(args.device)
@@ -577,12 +647,17 @@ def main():
     
     # Train
     print('\n* Starting training...')
+    print(f'* Batch size: {args.batch_size}')
+    print(f'* Image size: {args.im_size}x{args.im_size}')
+    print(f'* Num workers: {args.num_workers}')
+    print(f'* Batches per epoch: {len(train_loader)}')
+    print(f'* Gradient clipping: {args.grad_clip}')
     print('=' * 50)
     best_auc, best_dice, best_cycle = train_model(
         model, optimizer, criterion,
         train_loader, test_loader,
         scheduler, args.grad_acc_steps,
-        args.metric, experiment_path
+        args.metric, experiment_path, args.grad_clip
     )
     
     print('\n' + '=' * 50)
@@ -599,19 +674,22 @@ def main():
         model, _, _ = load_model(model, experiment_path, device=device)
         model = model.to(device)
         
-        test_auc, test_dice, test_loss = test_model(model, test_loader, criterion)
+        test_metrics, test_loss = test_model(model, test_loader, criterion)
         
         # Save final results
         with open(osp.join(experiment_path, 'final_results.txt'), 'w') as f:
             f.write(f'Training Results\n')
             f.write(f'================\n')
             f.write(f'Best Validation AUC: {100*best_auc:.2f}%\n')
-            f.write(f'Best Validation DICE: {100*best_dice:.2f}%\n')
+            f.write(f'Best Validation F1: {100*best_dice:.2f}%\n')
             f.write(f'Best Cycle: {best_cycle}\n')
             f.write(f'\nTest Results\n')
             f.write(f'============\n')
-            f.write(f'Test AUC: {100*test_auc:.2f}%\n')
-            f.write(f'Test DICE: {100*test_dice:.2f}%\n')
+            f.write(f'Test AUC:       {test_metrics["auc"]:.4f} ({100*test_metrics["auc"]:.2f}%)\n')
+            f.write(f'Test Accuracy:  {test_metrics["acc"]:.4f} ({100*test_metrics["acc"]:.2f}%)\n')
+            f.write(f'Test F1:        {test_metrics["f1"]:.4f} ({100*test_metrics["f1"]:.2f}%)\n')
+            f.write(f'Test Precision: {test_metrics["prec"]:.4f} ({100*test_metrics["prec"]:.2f}%)\n')
+            f.write(f'Test Recall:    {test_metrics["rec"]:.4f} ({100*test_metrics["rec"]:.2f}%)\n')
             f.write(f'Test Loss: {test_loss:.4f}\n')
         
         print(f'\n* Results saved to: {experiment_path}')

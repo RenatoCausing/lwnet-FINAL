@@ -1,5 +1,5 @@
 import torch
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score as sklearn_f1_score, accuracy_score as sklearn_accuracy_score
 import numpy as np
 from scipy.stats import rankdata
 
@@ -42,8 +42,6 @@ def ewma(data, window=5):
     cumsums = mult.cumsum()
     out = offset + cumsums*scale_arr[::-1]
     return out
-from sklearn.metrics import f1_score
-
 # def evaluate(logits, labels, n_classes, ignore_index = -100, fast=True):
 #     all_preds = []
 #     all_targets = []
@@ -113,4 +111,52 @@ def evaluate(logits, labels, n_classes, ignore_index = -100, fast=True):
         if fast==True:
             return fast_auc(all_targets_np>0.5, all_probs_np), f1_score(all_targets_np>0.5, all_preds_np)
         else:
-            return roc_auc_score(all_targets_np, all_probs_np), f1_score(all_targets_np, all_preds_np)
+            return roc_auc_score(all_targets_np, all_probs_np),sklearn_f1_score(all_targets_np>0.5, all_preds_np)
+        else:
+            return roc_auc_score(all_targets_np, all_probs_np), sklearn_f1_score(all_targets_np, all_preds_np)
+
+
+def compute_metrics(logits, labels, n_classes, ignore_index=-100, threshold=0.5):
+    """
+    Compute comprehensive metrics: AUC, Accuracy, Precision, Recall, F1
+    
+    Returns:
+        dict: Dictionary containing all metrics
+    """
+    all_probs = []
+    all_targets = []
+    
+    act = torch.sigmoid if n_classes == 1 else torch.nn.Softmax(dim=0)
+    
+    for i in range(len(logits)):
+        prob = act(logits[i]).detach().cpu().numpy()
+        target = labels[i].cpu().numpy()
+        
+        all_probs.extend(prob.ravel())
+        all_targets.append(target.ravel())
+    
+    all_probs_np = np.hstack(all_probs)
+    all_targets_np = np.hstack(all_targets)
+    
+    # Filter out ignored indices
+    all_probs_np = all_probs_np[all_targets_np != ignore_index]
+    all_targets_np = all_targets_np[all_targets_np != ignore_index]
+    
+    # Binary predictions
+    all_preds_np = all_probs_np > threshold
+    all_targets_binary = all_targets_np > 0.5
+    
+    # Compute all metrics
+    auc = roc_auc_score(all_targets_binary, all_probs_np)
+    acc = sklearn_accuracy_score(all_targets_binary, all_preds_np)
+    prec = precision_score(all_targets_binary, all_preds_np, zero_division=0)
+    rec = recall_score(all_targets_binary, all_preds_np, zero_division=0)
+    f1 = sklearn_f1_score(all_targets_binary, all_preds_np, zero_division=0)
+    
+    return {
+        'auc': auc,
+        'acc': acc,
+        'prec': prec,
+        'rec': rec,
+        'f1': f1
+    }
