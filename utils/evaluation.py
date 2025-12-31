@@ -111,9 +111,7 @@ def evaluate(logits, labels, n_classes, ignore_index = -100, fast=True):
         if fast==True:
             return fast_auc(all_targets_np>0.5, all_probs_np), f1_score(all_targets_np>0.5, all_preds_np)
         else:
-            return roc_auc_score(all_targets_np, all_probs_np),sklearn_f1_score(all_targets_np>0.5, all_preds_np)
-        else:
-            return roc_auc_score(all_targets_np, all_probs_np), sklearn_f1_score(all_targets_np, all_preds_np)
+            return roc_auc_score(all_targets_np, all_probs_np), sklearn_f1_score(all_targets_np>0.5, all_preds_np)
 
 
 def compute_metrics(logits, labels, n_classes, ignore_index=-100, threshold=0.5):
